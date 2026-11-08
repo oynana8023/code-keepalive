@@ -2,7 +2,44 @@ name: MonkeyCode Keepalive
 
 on:
   schedule:
+    # 白天高峰期（name: MonkeyCode Keepalive
+
+on:
+  schedule:
     # 白天高峰期（北京时间 08:00–18:00）：每 8 分钟一次
+    - cron: '*/8 0-10 * * *'
+    # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
+    - cron: '*/30 11-23 * * *'
+  workflow_dispatch:   # 保留手动触发按钮，方便测试
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send WebSocket heartbeat
+        env:
+          TASK_ID: ${{ secrets.MONKEY_TASK_ID }}
+          MONKEY_COOKIE: ${{ secrets.MONKEY_COOKIE }}  # 新增了这行，用于读取Cookie
+        run: |
+          pip install websockets --quiet
+          python - <<'PY'
+          import asyncio, os, json, websockets
+
+          TASK_ID = os.environ["TASK_ID"]
+          COOKIE = os.environ["MONKEY_COOKIE"]  # 获取 Cookie
+          URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={TASK_ID}"
+          PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
+
+          async def heartbeat():
+              # 在连接时带上 Cookie 头，解决 401 错误
+              async with websockets.connect(URL, extra_headers={"Cookie": COOKIE}) as ws:
+                  for _ in range(6):
+                      await ws.send(json.dumps(PAYLOAD))
+                      print("📡 ping sent")
+                      await asyncio.sleep(10)
+
+          asyncio.run(heartbeat())
+          PY 08:00–18:00）：每 8 分钟一次
     - cron: '*/8 0-10 * * *'
     # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
     - cron: '*/30 11-23 * * *'
