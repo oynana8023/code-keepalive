@@ -2,11 +2,11 @@ name: MonkeyCode Keepalive
 
 on:
   schedule:
-    # 白天高频（北京时间 08:00–18:00）：每 8 分钟一次
+    # 白天高峰期（北京时间 08:00–18:00）：每 8 分钟一次
     - cron: '*/8 0-10 * * *'
-    # 夜间低频（北京时间 19:00–次日 07:00）：每 30 分钟一次
+    # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
     - cron: '*/30 11-23 * * *'
-  workflow_dispatch:   # 保留手动触发按钮，方便测试
+  workflow_dispatch:   # 保留手动触发按钮，方便随时测试
 
 jobs:
   keepalive:
@@ -15,11 +15,10 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # 固定版本，防止未来环境更新导致玄学报错
+          python-version: '3.10'
 
       - name: Install dependencies
-        # 固定 websockets 版本，防止新版 API 变动导致 extra_headers 参数报错
-        run: pip install websockets==12.0 --quiet
+        run: pip install websockets --quiet
 
       - name: Run Heartbeat Script
         env:
@@ -33,20 +32,34 @@ jobs:
           TASK_ID = os.environ.get("TASK_ID")
           COOKIE = os.environ.get("MONKEY_COOKIE")
 
-          # 前置检查：防止忘记填 Secret 导致报错看不懂
           if not TASK_ID or not COOKIE:
-              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE 环境变量。请检查 GitHub Secrets 配置。")
+              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE 环境变量。")
               sys.exit(1)
 
           URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={TASK_ID}"
           PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
-          HEADERS = {"Cookie": COOKIE}
+
+          # 构造完整请求头，绕过 HTTP 400 拦截
+          HEADERS = {
+              "Cookie": COOKIE,
+              "Origin": "https://monkeycode-ai.com",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+              "Pragma": "no-cache",
+              "Cache-Control": "no-cache"
+          }
 
           async def heartbeat():
               try:
-                  print(f"🔗 正在连接 WebSocket 目标: {URL}")
-                  # 添加超时设置，防止卡死
-                  async with websockets.connect(URL, extra_headers=HEADERS, open_timeout=15) as ws:
+                  print(f"🔗 正在连接 WebSocket: {URL}")
+                  
+                  # 自动兼容不同版本的 websockets 库参数
+                  try:
+                      ws_connect = websockets.connect(URL, additional_headers=HEADERS, open_timeout=15)
+                  except TypeError:
+                      ws_connect = websockets.connect(URL, extra_headers=HEADERS, open_timeout=15)
+
+                  async with ws_connect as ws:
                       print("✅ WebSocket 连接成功，开始发送心跳！")
                       for i in range(6):
                           await ws.send(json.dumps(PAYLOAD))
