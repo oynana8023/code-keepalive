@@ -2,13 +2,9 @@ name: MonkeyCode Keepalive
 
 on:
   schedule:
-    # 白天高峰期（name: MonkeyCode Keepalive
-
-on:
-  schedule:
-    # 白天高峰期（北京时间 08:00–18:00）：每 8 分钟一次
+    # 白天高频（北京时间 08:00–18:00）：每 8 分钟一次
     - cron: '*/8 0-10 * * *'
-    # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
+    # 夜间低频（北京时间 19:00–次日 07:00）：每 30 分钟一次
     - cron: '*/30 11-23 * * *'
   workflow_dispatch:   # 保留手动触发按钮，方便测试
 
@@ -16,57 +12,54 @@ jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
-      - name: Send WebSocket heartbeat
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # 固定版本，防止未来环境更新导致玄学报错
+
+      - name: Install dependencies
+        # 固定 websockets 版本，防止新版 API 变动导致 extra_headers 参数报错
+        run: pip install websockets==12.0 --quiet
+
+      - name: Run Heartbeat Script
         env:
           TASK_ID: ${{ secrets.MONKEY_TASK_ID }}
-          MONKEY_COOKIE: ${{ secrets.MONKEY_COOKIE }}  # 新增了这行，用于读取Cookie
+          MONKEY_COOKIE: ${{ secrets.MONKEY_COOKIE }}
         run: |
-          pip install websockets --quiet
           python - <<'PY'
-          import asyncio, os, json, websockets
+          import asyncio, os, json, sys
+          import websockets
 
-          TASK_ID = os.environ["TASK_ID"]
-          COOKIE = os.environ["MONKEY_COOKIE"]  # 获取 Cookie
+          TASK_ID = os.environ.get("TASK_ID")
+          COOKIE = os.environ.get("MONKEY_COOKIE")
+
+          # 前置检查：防止忘记填 Secret 导致报错看不懂
+          if not TASK_ID or not COOKIE:
+              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE 环境变量。请检查 GitHub Secrets 配置。")
+              sys.exit(1)
+
           URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={TASK_ID}"
           PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
+          HEADERS = {"Cookie": COOKIE}
 
           async def heartbeat():
-              # 在连接时带上 Cookie 头，解决 401 错误
-              async with websockets.connect(URL, extra_headers={"Cookie": COOKIE}) as ws:
-                  for _ in range(6):
-                      await ws.send(json.dumps(PAYLOAD))
-                      print("📡 ping sent")
-                      await asyncio.sleep(10)
+              try:
+                  print(f"🔗 正在连接 WebSocket 目标: {URL}")
+                  # 添加超时设置，防止卡死
+                  async with websockets.connect(URL, extra_headers=HEADERS, open_timeout=15) as ws:
+                      print("✅ WebSocket 连接成功，开始发送心跳！")
+                      for i in range(6):
+                          await ws.send(json.dumps(PAYLOAD))
+                          print(f"📡 第 {i+1}/6 次 ping 发送成功")
+                          await asyncio.sleep(10)
+                  print("🎉 本轮保活执行完毕，正常退出。")
+              except websockets.exceptions.InvalidStatus as e:
+                  print(f"❌ 连接被拒绝 (状态码错误): {e}")
+                  print("👉 原因大概率是 Cookie 过期了，请重新获取 Cookie 并更新 MONKEY_COOKIE。")
+                  sys.exit(1)
+              except Exception as e:
+                  print(f"❌ 发生未知异常: {e}")
+                  sys.exit(1)
 
-          asyncio.run(heartbeat())
-          PY 08:00–18:00）：每 8 分钟一次
-    - cron: '*/8 0-10 * * *'
-    # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
-    - cron: '*/30 11-23 * * *'
-  workflow_dispatch:   # 保留手动触发按钮，方便首次测试
-
-jobs:
-  keepalive:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send WebSocket heartbeat
-        env:
-          TASK_ID: ${{ secrets.MONKEY_TASK_ID }}
-        run: |
-          pip install websockets --quiet
-          python - <<'PY'
-          import asyncio, os, json, websockets
-          
-          TASK_ID = os.environ["TASK_ID"]
-          URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={TASK_ID}"
-          PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
-          
-          async def heartbeat():
-              async with websockets.connect(URL) as ws:
-                  for _ in range(6):          # 发 6 次心跳（约耗时 1 分钟）
-                      await ws.send(json.dumps(PAYLOAD))
-                      print("📡 ping sent")
-                      await asyncio.sleep(10)
-          
           asyncio.run(heartbeat())
           PY
