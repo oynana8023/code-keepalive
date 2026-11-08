@@ -1,21 +1,26 @@
-name: MonkeyCode Real Keepalive & Wakeup
+name: MonkeyCode Keepalive
 
 on:
   schedule:
-    # 白天高频（北京时间 08:00–18:00）：每 8 分钟一次
-    - cron: '*/8 0-10 * * *'
-    # 夜间低频（北京时间 18:00–次日 08:00）：每 30 分钟一次
-    - cron: '*/30 10-23 * * *'
-  workflow_dispatch:
+    # 低频触发，防止被 GitHub 判定为滥用：只在白天（北京时间 08:00–18:00）每小时整点跑一次
+    - cron: '0 0-10 * * *'
+  workflow_dispatch:   # 保留手动触发按钮，方便你随时测试
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # 允许单次任务最长运行 60 分钟
+    
     steps:
-      - name: Install dependencies
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
         run: pip install requests websockets --quiet
 
-      - name: Check Status and Wakeup
+      - name: 执行长跑保活任务
         env:
           TASK_ID: ${{ secrets.MONKEY_TASK_ID }}
           MONKEY_COOKIE: ${{ secrets.MONKEY_COOKIE }}
@@ -27,6 +32,12 @@ jobs:
 
           TASK_ID = os.environ.get("TASK_ID")
           COOKIE = os.environ.get("MONKEY_COOKIE")
+
+          if not TASK_ID or not COOKIE:
+              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE。")
+              sys.exit(1)
+
+          # 兼容处理：去除可能存在的 task- 前缀
           CLEAN_ID = TASK_ID.replace("task-", "")
 
           HEADERS = {
@@ -36,55 +47,51 @@ jobs:
               "Referer": f"https://monkeycode-ai.com/console/task/{TASK_ID}"
           }
 
-          STATUS_URL = f"https://monkeycode-ai.com/api/v1/users/tasks/{TASK_ID}"
-          # 【关键】：如果发现休眠，调用启动 API (根据常见规范盲猜的启动接口，如果不准会打印出来)
-          START_URL = f"https://monkeycode-ai.com/api/v1/users/tasks/{TASK_ID}/start"
-          
           def check_and_wake():
-              print(f"🔍 1. 正在检查任务 {CLEAN_ID} 状态...")
+              print(f"🔍 正在检查任务 {CLEAN_ID} 状态...")
               try:
-                  res = requests.get(STATUS_URL, headers=HEADERS, timeout=10)
+                  res = requests.get(f"https://monkeycode-ai.com/api/v1/users/tasks/{TASK_ID}", headers=HEADERS, timeout=10)
                   if res.status_code == 200:
-                      data = res.json().get("data", {})
-                      status = data.get("status", "unknown")
-                      print(f"👉 当前环境状态: {status}")
-
-                      # 如果状态不是 running 或者 processing，说明睡死了
+                      status = res.json().get("data", {}).get("status", "unknown")
+                      print(f"👉 当前状态: {status}")
+                      # 如果环境处于休眠/停止状态，发 POST 请求强制唤醒
                       if status not in ["running", "processing", "starting"]:
-                          print(f"⚠️ 发现环境休眠({status})，正在尝试发送启动指令...")
-                          # 尝试发送 POST 启动请求
-                          start_res = requests.post(START_URL, headers=HEADERS, timeout=10)
-                          print(f"🚀 启动请求返回: {start_res.status_code}")
-                          if start_res.status_code == 200:
-                              print("✅ 启动指令发送成功，等待 15 秒环境初始化...")
-                              time.sleep(15)
-                      else:
-                          print("✅ 环境处于活跃状态，准备发送心跳。")
-                  else:
-                      print(f"❌ 检查状态失败，HTTP {res.status_code}")
+                          print(f"⚠️ 发现环境休眠({status})，正在发送启动指令...")
+                          start_res = requests.post(f"https://monkeycode-ai.com/api/v1/users/tasks/{TASK_ID}/start", headers=HEADERS, timeout=10)
+                          print(f"🚀 唤醒指令已发送 (状态码: {start_res.status_code})")
+                          time.sleep(15) # 等待服务器初始化
+                  elif res.status_code == 401:
+                      print("❌ 401 错误：Cookie 过期！请更新 MONKEY_COOKIE。")
               except Exception as e:
-                  print(f"⚠️ 检查状态发生异常: {e}")
+                  print(f"⚠️ 检查状态异常: {e}")
 
-          async def send_ws_heartbeat():
+          async def ws_heartbeat():
               URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={CLEAN_ID}"
               PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
-              print(f"🔗 2. 正在建立 WebSocket 心跳连接...")
               try:
+                  # 兼容不同 websockets 版本
                   try:
                       ws_connect = websockets.connect(URL, additional_headers=HEADERS, open_timeout=10)
                   except TypeError:
                       ws_connect = websockets.connect(URL, extra_headers=HEADERS, open_timeout=10)
-
+                  
                   async with ws_connect as ws:
-                      for i in range(6):
-                          await ws.send(json.dumps(PAYLOAD))
-                          print(f"📡 第 {i+1}/6 次 ping 发送成功")
-                          await asyncio.sleep(10)
-                  print("🎉 本次真实保活执行完毕。")
+                      await ws.send(json.dumps(PAYLOAD))
+                      print("📡 WebSocket Ping 发送成功")
               except Exception as e:
-                  print(f"❌ WebSocket 连接失败: {e}")
+                  print(f"❌ WebSocket 连接异常: {e}")
 
-          # 执行流程
-          check_and_wake()
-          asyncio.run(send_ws_heartbeat())
+          # --- 核心循环逻辑 ---
+          print("🚀 开启长跑保活模式（每 8 分钟心跳一次，持续 55 分钟）...")
+          start_time = time.time()
+          MAX_RUNTIME = 3300  # 运行 55 分钟（3300秒），留 5 分钟给 GitHub 调度
+          
+          while time.time() - start_time < MAX_RUNTIME:
+              check_and_wake()
+              asyncio.run(ws_heartbeat())
+              
+              print(f"⏳ 已运行 {int(time.time() - start_time)} 秒，等待 8 分钟后进行下一次心跳...")
+              time.sleep(480) # 等待 8 分钟（480秒）
+              
+          print("🎉 本小时保活任务圆满结束，等待下个整点自动触发。")
           PY
