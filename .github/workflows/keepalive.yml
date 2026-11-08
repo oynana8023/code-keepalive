@@ -1,78 +1,81 @@
-name: MonkeyCode Keepalive
+name: MonkeyCode HTTP Keepalive
 
 on:
   schedule:
-    # 白天高峰期（北京时间 08:00–18:00）：每 8 分钟一次
+    # 白天高频（北京时间 08:00–18:00）：每 8 分钟一次
     - cron: '*/8 0-10 * * *'
-    # 夜间低谷期（北京时间 18:00–次日 08:00）：每 30 分钟一次
+    # 夜间低频（北京时间 19:00–次日 07:00）：每 30 分钟一次
     - cron: '*/30 11-23 * * *'
-  workflow_dispatch:   # 保留手动触发按钮，方便随时测试
+  workflow_dispatch:   # 保留手动触发按钮，方便测试
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - name: Install requests
+        run: pip install requests --quiet
 
-      - name: Install dependencies
-        run: pip install websockets --quiet
-
-      - name: Run Heartbeat Script
+      - name: Run HTTP Heartbeat
         env:
           TASK_ID: ${{ secrets.MONKEY_TASK_ID }}
           MONKEY_COOKIE: ${{ secrets.MONKEY_COOKIE }}
         run: |
           python - <<'PY'
-          import asyncio, os, json, sys
-          import websockets
+          import os, sys, time
+          import requests
 
           TASK_ID = os.environ.get("TASK_ID")
           COOKIE = os.environ.get("MONKEY_COOKIE")
 
           if not TASK_ID or not COOKIE:
-              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE 环境变量。")
+              print("❌ 错误: 缺少 TASK_ID 或 MONKEY_COOKIE。")
               sys.exit(1)
 
-          URL = f"wss://monkeycode-ai.com/api/v1/users/tasks/control?id={TASK_ID}"
-          PAYLOAD = {"type": "ping", "data": None, "kind": "", "timestamp": 0}
-
-          # 构造完整请求头，绕过 HTTP 400 拦截
+          # 构造完整的模拟浏览器请求头
           HEADERS = {
               "Cookie": COOKIE,
-              "Origin": "https://monkeycode-ai.com",
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-              "Pragma": "no-cache",
-              "Cache-Control": "no-cache"
+              "Accept": "application/json, text/plain, */*",
+              "Referer": f"https://monkeycode-ai.com/console/task/{TASK_ID}",
+              "Origin": "https://monkeycode-ai.com"
           }
 
-          async def heartbeat():
-              try:
-                  print(f"🔗 正在连接 WebSocket: {URL}")
+          # 备用请求目标：任务详情、任务列表、用户订阅信息（发其中一个就能保活）
+          URLS = [
+              f"https://monkeycode-ai.com/api/v1/users/tasks/{TASK_ID}",
+              "https://monkeycode-ai.com/api/v1/users/tasks?page=1&size=10",
+              "https://monkeycode-ai.com/api/v1/users/subscription"
+          ]
+
+          def heartbeat():
+              for i in range(6): # 每次触发循环请求6次，持续约1分钟
+                  success = False
+                  for url in URLS:
+                      try:
+                          response = requests.get(url, headers=HEADERS, timeout=10)
+                          
+                          if response.status_code == 200:
+                              print(f"✅ 第 {i+1}/6 次请求成功 | 目标: {url.split('/')[-1][:20]} | 环境已保活。")
+                              success = True
+                              break # 只要有一个接口成功，就退出当前循环，等 10 秒
+                          elif response.status_code == 401:
+                              print(f"❌ 请求失败 (401): Cookie 已过期或无效！")
+                              print("👉 请重新去手机浏览器抓取最新的 Cookie，并更新 MONKEY_COOKIE。")
+                              sys.exit(1)
+                          else:
+                              # 如果是 404 等其他错误，就静默尝试下一个 URL
+                              pass
+                      except Exception as e:
+                          print(f"⚠️ 网络异常 ({url.split('/')[-1][:20]}): {e}")
                   
-                  # 自动兼容不同版本的 websockets 库参数
-                  try:
-                      ws_connect = websockets.connect(URL, additional_headers=HEADERS, open_timeout=15)
-                  except TypeError:
-                      ws_connect = websockets.connect(URL, extra_headers=HEADERS, open_timeout=15)
+                  if not success:
+                      print(f"⚠️ 第 {i+1}/6 次轮询未命中任何 200 状态码（但仍可能已保活）")
+                  
+                  # 间隔 10 秒发一次
+                  if i < 5:
+                      time.sleep(10)
 
-                  async with ws_connect as ws:
-                      print("✅ WebSocket 连接成功，开始发送心跳！")
-                      for i in range(6):
-                          await ws.send(json.dumps(PAYLOAD))
-                          print(f"📡 第 {i+1}/6 次 ping 发送成功")
-                          await asyncio.sleep(10)
-                  print("🎉 本轮保活执行完毕，正常退出。")
-              except websockets.exceptions.InvalidStatus as e:
-                  print(f"❌ 连接被拒绝 (状态码错误): {e}")
-                  print("👉 原因大概率是 Cookie 过期了，请重新获取 Cookie 并更新 MONKEY_COOKIE。")
-                  sys.exit(1)
-              except Exception as e:
-                  print(f"❌ 发生未知异常: {e}")
-                  sys.exit(1)
+              print("🎉 本轮 HTTP 保活执行完毕，正常退出。")
 
-          asyncio.run(heartbeat())
+          heartbeat()
           PY
